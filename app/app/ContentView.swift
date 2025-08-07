@@ -8,14 +8,15 @@
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var silentAuthManager = SilentAuthManager()
+    
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        if silentAuthManager.isAuthenticated {
+            SilentAuthenticatedView(authManager: silentAuthManager)
+        } else {
+            SilentAuthView()
+                .environmentObject(silentAuthManager)
         }
-        .padding()
     }
 }
 
