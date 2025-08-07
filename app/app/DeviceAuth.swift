@@ -72,8 +72,6 @@ class DeviceAuthManager: ObservableObject {
     func establishDeviceTrust(phoneNumber: String) async -> Bool {
         let deviceFingerprint = generateDeviceFingerprint()
         
-        // In a real app, you'd send this to your server for verification
-        // Server would check if this device+phone combo is new or trusted
         let trustData = DeviceTrustData(
             phoneNumber: phoneNumber,
             deviceFingerprint: deviceFingerprint,
@@ -84,14 +82,14 @@ class DeviceAuthManager: ObservableObject {
         // Store device trust locally
         keychain.store(trustData, forKey: "device_trust")
         
-        // Simulate server verification
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        // Send to server for verification
+        let success = await callDeviceTrustAPI(phoneNumber: phoneNumber, deviceFingerprint: deviceFingerprint)
         
         await MainActor.run {
-            self.deviceTrusted = true
+            self.deviceTrusted = success
         }
         
-        return true
+        return success
     }
     
     // MARK: - Authentication Flow
@@ -107,17 +105,19 @@ class DeviceAuthManager: ObservableObject {
             let biometricSuccess = await authenticateWithBiometrics()
             
             if biometricSuccess {
-                let userID = generateUserID(from: phoneNumber, deviceFingerprint: deviceFingerprint)
+                // Call API for device authentication
+                let apiResult = await callDeviceAuthAPI(phoneNumber: phoneNumber, deviceFingerprint: deviceFingerprint, biometricVerified: true)
                 
-                await MainActor.run {
-                    self.currentUserID = userID
-                    self.currentPhoneNumber = phoneNumber
-                    self.isAuthenticated = true
-                    self.deviceTrusted = true
-                    self.saveAuth()
+                if apiResult {
+                    await MainActor.run {
+                        self.isAuthenticated = true
+                        self.deviceTrusted = true
+                        self.saveAuth()
+                    }
+                    return .success
+                } else {
+                    return .error("API authentication failed")
                 }
-                
-                return .success
             } else {
                 return .biometricFailed
             }
@@ -230,5 +230,79 @@ class DeviceKeychainManager {
         ]
         
         SecItemDelete(query as CFDictionary)
+    }
+}
+
+// MARK: - API Integration
+extension DeviceAuthManager {
+    private func callDeviceTrustAPI(phoneNumber: String, deviceFingerprint: String) async -> Bool {
+        guard let url = URL(string: "http://localhost:3000/api/auth/device-trust") else { return false }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body = [
+            "phoneNumber": phoneNumber,
+            "deviceFingerprint": deviceFingerprint,
+            "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode == 200 {
+                return true
+            }
+        } catch {
+            print("Device trust API error: \(error)")
+        }
+        
+        return false
+    }
+    
+    private func callDeviceAuthAPI(phoneNumber: String, deviceFingerprint: String, biometricVerified: Bool) async -> Bool {
+        guard let url = URL(string: "http://localhost:3000/api/auth/device-auth") else { return false }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body = [
+            "phoneNumber": phoneNumber,
+            "deviceFingerprint": deviceFingerprint,
+            "biometricVerified": biometricVerified
+        ] as [String : Any]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode == 200,
+               let jsonData = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let success = jsonData["success"] as? Bool,
+               success,
+               let user = jsonData["user"] as? [String: Any],
+               let userId = user["id"] as? String,
+               let token = jsonData["token"] as? String {
+                
+                await MainActor.run {
+                    self.currentUserID = userId
+                    self.currentPhoneNumber = phoneNumber
+                }
+                
+                // Store token for API calls
+                UserDefaults.standard.set(token, forKey: "auth_token")
+                
+                return true
+            }
+        } catch {
+            print("Device auth API error: \(error)")
+        }
+        
+        return false
     }
 }

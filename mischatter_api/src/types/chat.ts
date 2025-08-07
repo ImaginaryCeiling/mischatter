@@ -2,6 +2,9 @@ export interface User {
   id: string;
   username: string;
   avatar?: string;
+  phoneNumber?: string;
+  deviceFingerprint?: string;
+  authMethod?: 'phone' | 'device' | 'silent' | 'username';
   isOnline: boolean;
   joinedAt: Date;
 }

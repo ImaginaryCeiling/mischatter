@@ -50,33 +50,49 @@ class SilentAuthManager: ObservableObject {
             
             // Check if device is known
             if let storedUserID = keychain.retrieve(String.self, forKey: "user_\(deviceFingerprint)") {
-                // Device recognized, auto-login
+                // Device recognized, try silent auth with API
+                let success = await callSilentAuthAPI(deviceFingerprint: deviceFingerprint)
+                
                 await MainActor.run {
-                    self.currentUserID = storedUserID
-                    self.isAuthenticated = true
+                    if success {
+                        self.currentUserID = storedUserID
+                        self.isAuthenticated = true
+                    } else {
+                        // Fallback to creating new user
+                        Task { await self.createNewUser(deviceFingerprint: deviceFingerprint) }
+                    }
                     self.isLoading = false
                 }
             } else {
-                // New device, create user
+                // New device, create user through API
                 await createNewUser(deviceFingerprint: deviceFingerprint)
             }
         }
     }
     
     private func createNewUser(deviceFingerprint: String) async {
-        // Generate unique user ID from device fingerprint
-        let userID = "user_" + deviceFingerprint.prefix(16)
+        let success = await callSilentAuthAPI(deviceFingerprint: deviceFingerprint)
         
-        // Store this device
-        keychain.store(userID, forKey: "user_\(deviceFingerprint)")
-        
-        // Simulate brief loading for new device setup
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        
-        await MainActor.run {
-            self.currentUserID = userID
-            self.isAuthenticated = true
-            self.isLoading = false
+        if success {
+            // Store this device locally after successful API registration
+            let userID = "user_" + deviceFingerprint.prefix(16)
+            keychain.store(userID, forKey: "user_\(deviceFingerprint)")
+            
+            await MainActor.run {
+                self.currentUserID = userID
+                self.isAuthenticated = true
+                self.isLoading = false
+            }
+        } else {
+            // Fallback to local-only operation
+            let userID = "user_" + deviceFingerprint.prefix(16)
+            keychain.store(userID, forKey: "user_\(deviceFingerprint)")
+            
+            await MainActor.run {
+                self.currentUserID = userID
+                self.isAuthenticated = true
+                self.isLoading = false
+            }
         }
     }
     
@@ -173,5 +189,44 @@ class SilentKeychainManager {
         ]
         
         SecItemDelete(query as CFDictionary)
+    }
+}
+
+// MARK: - API Integration
+extension SilentAuthManager {
+    private func callSilentAuthAPI(deviceFingerprint: String) async -> Bool {
+        guard let url = URL(string: "http://localhost:3000/api/auth/silent-auth") else { return false }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body = [
+            "deviceFingerprint": deviceFingerprint
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode == 200,
+               let jsonData = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let success = jsonData["success"] as? Bool,
+               success,
+               let user = jsonData["user"] as? [String: Any],
+               let userId = user["id"] as? String,
+               let token = jsonData["token"] as? String {
+                
+                // Store token for API calls
+                UserDefaults.standard.set(token, forKey: "auth_token")
+                
+                return true
+            }
+        } catch {
+            print("Silent auth API error: \(error)")
+        }
+        
+        return false
     }
 }

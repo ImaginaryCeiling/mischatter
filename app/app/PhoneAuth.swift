@@ -62,24 +62,11 @@ class PhoneAuthManager: ObservableObject {
             print("Sending OTP to: \(phoneNumber)")
         }
         
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        return true
+        return await callPhoneRegisterAPI(phoneNumber: phoneNumber)
     }
     
     func verifyOTP(_ otp: String, for phoneNumber: String) async -> Bool {
-        guard otp == "123456" else { return false }
-        
-        let userID = generateUserID(from: phoneNumber)
-        storeDetectedPhoneNumber(phoneNumber)
-        
-        await MainActor.run {
-            self.currentUserID = userID
-            self.currentPhoneNumber = phoneNumber
-            self.isAuthenticated = true
-            self.saveAuth()
-        }
-        
-        return true
+        return await callPhoneVerifyAPI(phoneNumber: phoneNumber, otp: otp)
     }
     
     func logout() {
@@ -103,5 +90,78 @@ class PhoneAuthManager: ObservableObject {
     private func clearStoredAuth() {
         userDefaults.removeObject(forKey: userIDKey)
         userDefaults.removeObject(forKey: phoneKey)
+    }
+    
+    // MARK: - API Integration
+    private func callPhoneRegisterAPI(phoneNumber: String) async -> Bool {
+        guard let url = URL(string: "http://localhost:3000/api/auth/phone-register") else { return false }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body = [
+            "phoneNumber": phoneNumber
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode == 200 {
+                return true
+            }
+        } catch {
+            print("Phone register API error: \(error)")
+        }
+        
+        return false
+    }
+    
+    private func callPhoneVerifyAPI(phoneNumber: String, otp: String) async -> Bool {
+        guard let url = URL(string: "http://localhost:3000/api/auth/phone-verify") else { return false }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body = [
+            "phoneNumber": phoneNumber,
+            "otp": otp
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            if let httpResponse = response as? HTTPURLResponse,
+               httpResponse.statusCode == 200,
+               let jsonData = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let success = jsonData["success"] as? Bool,
+               success,
+               let user = jsonData["user"] as? [String: Any],
+               let userId = user["id"] as? String,
+               let token = jsonData["token"] as? String {
+                
+                storeDetectedPhoneNumber(phoneNumber)
+                
+                await MainActor.run {
+                    self.currentUserID = userId
+                    self.currentPhoneNumber = phoneNumber
+                    self.isAuthenticated = true
+                    self.saveAuth()
+                }
+                
+                // Store token for API calls
+                UserDefaults.standard.set(token, forKey: "auth_token")
+                
+                return true
+            }
+        } catch {
+            print("Phone verify API error: \(error)")
+        }
+        
+        return false
     }
 }
